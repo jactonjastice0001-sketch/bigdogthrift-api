@@ -1,0 +1,148 @@
+const express = require('express');
+const { query } = require('../config/db');
+const { verifyTransaction } = require('../services/flutterwave.service');
+const { auth } = require('../middleware/auth');
+const { stkPush } = require('../services/daraja.service');
+
+const router = express.Router();
+
+/**
+ * Safaricom calls this URL after the buyer accepts/rejects/ignores the STK Push prompt.
+ * This endpoint MUST be public (no auth) since Safaricom's servers call it directly —
+ * but it's safe because we only use it to look up an order by CheckoutRequestID we
+ * ourselves generated, never to trust arbitrary input as a payment instruction.
+ */
+router.post('/mpesa/callback', async (req, res) => {
+  try {
+    const callback = req.body?.Body?.stkCallback;
+    if (!callback) return res.status(400).json({ ok: false });
+
+    const { CheckoutRequestID, ResultCode, CallbackMetadata } = callback;
+
+    if (ResultCode === 0) {
+      const items = CallbackMetadata?.Item || [];
+      const receipt = items.find((i) => i.Name === 'MpesaReceiptNumber')?.Value;
+      await query(
+        `UPDATE orders SET payment_status = 'confirmed', transaction_code = $1
+         WHERE mpesa_checkout_request_id = $2`,
+        [receipt, CheckoutRequestID]
+      );
+    } else {
+      await query(
+        `UPDATE orders SET payment_status = 'failed' WHERE mpesa_checkout_request_id = $1`,
+        [CheckoutRequestID]
+      );
+    }
+    // Safaricom just needs a 200 acknowledging receipt
+    res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+  } catch (err) {
+    console.error('M-Pesa callback error:', err);
+    res.status(500).json({ ResultCode: 1, ResultDesc: 'Server error' });
+  }
+});
+
+/**
+ * Flutterwave webhook — fires when a card charge completes. Always re-verify the
+ * transaction server-side (never trust the webhook body alone) before marking paid.
+ */
+router.post('/flutterwave/webhook', express.json(), async (req, res) => {
+  try {
+    const signature = req.headers['verif-hash'];
+    if (!signature || signature !== process.env.FLW_WEBHOOK_SECRET_HASH) {
+      return res.status(401).json({ error: 'Invalid webhook signature' });
+    }
+
+    const { data } = req.body;
+    if (data?.status === 'successful') {
+      const verified = await verifyTransaction(data.id);
+      if (verified.data.status === 'successful' && verified.data.amount >= data.amount && verified.data.currency === 'KES') {
+        await query(
+          `UPDATE orders SET payment_status = 'confirmed', transaction_code = $1 WHERE flutterwave_tx_ref = $2`,
+          [String(data.id), data.tx_ref]
+        );
+      }
+    }
+    res.status(200).send('ok');
+  } catch (err) {
+    console.error('Flutterwave webhook error:', err);
+    res.status(500).send('error');
+  }
+});
+
+// Buyer's browser lands here after completing/cancelling a card payment on Flutterwave
+router.get('/flutterwave/redirect', async (req, res) => {
+  const { tx_ref, status } = req.query;
+  // In production, redirect to your storefront's "order confirmation" page instead:
+  res.send(`Payment ${status} for order ${tx_ref}. You can close this window and return to Duka Tag.`);
+});
+
+
+router.post('/mpesa/initiate', auth, async (req, res) => {
+  try {
+    const { orderId, phone } = req.body;
+    if (!orderId || !phone) {
+      return res.status(400).json({ success: false, message: 'orderId and phone are required' });
+    }
+
+    const orderResult = await query(
+      `SELECT * FROM orders WHERE id = $1 AND buyer_id = $2`,
+      [orderId, req.user.id]
+    );
+    const order = orderResult.rows[0];
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+    if (order.payment_status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'Payment already submitted for this order' });
+    }
+
+    const stkResult = await stkPush({
+      phone,
+      amount: order.total,
+      orderCode: order.order_code,
+    });
+
+    if (stkResult.ResponseCode !== '0') {
+      return res.status(502).json({
+        success: false,
+        message: stkResult.ResponseDescription || 'Could not start M-Pesa payment',
+      });
+    }
+
+    await query(
+      `UPDATE orders SET mpesa_checkout_request_id = $1, updated_at = NOW() WHERE id = $2`,
+      [stkResult.CheckoutRequestID, orderId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Check your phone for the M-Pesa prompt',
+      checkoutRequestId: stkResult.CheckoutRequestID,
+    });
+  } catch (err) {
+    console.error('M-Pesa initiate error name:', err.name);
+    console.error('M-Pesa initiate error code:', err.code);
+    console.error('M-Pesa initiate error message:', err.message);
+    console.error('M-Pesa initiate error response data:', JSON.stringify(err.response?.data, null, 2));
+    console.error('M-Pesa initiate error status:', err.response?.status);
+    res.status(500).json({ success: false, message: 'Could not start M-Pesa payment' });
+  }
+});
+
+router.get('/status/:orderId', auth, async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT payment_status, transaction_code FROM orders WHERE id = $1 AND buyer_id = $2`,
+      [req.params.orderId, req.user.id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+    res.json({ success: true, ...result.rows[0] });
+  } catch (err) {
+    console.error('Payment status error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+module.exports = router;

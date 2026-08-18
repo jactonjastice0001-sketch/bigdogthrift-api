@@ -1,0 +1,46 @@
+import { createContext, useContext, useEffect, useState } from 'react';
+import api from '../api/axios';
+
+const CurrencyContext = createContext();
+
+const CURRENCY_OPTIONS = [
+  { code: 'KES', label: 'KES — Kenyan Shilling' },
+  { code: 'USD', label: 'USD — US Dollar' },
+  { code: 'EUR', label: 'EUR — Euro' },
+  { code: 'GBP', label: 'GBP — British Pound' },
+  { code: 'UGX', label: 'UGX — Ugandan Shilling' },
+  { code: 'TZS', label: 'TZS — Tanzanian Shilling' },
+  { code: 'ZAR', label: 'ZAR — South African Rand' },
+  { code: 'CNY', label: 'CNY — Chinese Yuan' },
+];
+
+export function CurrencyProvider({ children }) {
+  const [currency, setCurrency] = useState('KES');
+  const [rates, setRates] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api.get('/currency/rates')
+      .then((res) => setRates(res.data.rates))
+      .catch((err) => console.error('Failed to load exchange rates:', err))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const convert = (amountInKes) => {
+    if (currency === 'KES' || !rates || !rates[currency]) return amountInKes;
+    return amountInKes * rates[currency];
+  };
+
+  const format = (amountInKes) => {
+    const converted = convert(amountInKes);
+    return `${currency} ${converted.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  };
+
+  return (
+    <CurrencyContext.Provider value={{ currency, setCurrency, rates, loading, convert, format, CURRENCY_OPTIONS }}>
+      {children}
+    </CurrencyContext.Provider>
+  );
+}
+
+export const useCurrency = () => useContext(CurrencyContext);

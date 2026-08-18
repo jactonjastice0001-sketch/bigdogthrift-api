@@ -1,0 +1,8 @@
+node_modules/
+.env
+venv/
+uploads/*
+!uploads/.gitkeep
+*.swp
+.DS_Store
+__pycache__/

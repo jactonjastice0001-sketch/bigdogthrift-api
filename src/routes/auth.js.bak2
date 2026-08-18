@@ -1,0 +1,158 @@
+const express = require('express');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const { query } = require('../config/db');
+const router = express.Router();
+
+// Test route
+router.get('/test', (req, res) => {
+    res.json({ message: 'Auth router is working!' });
+});
+
+// Register
+router.post('/register', async (req, res) => {
+    try {
+        const { email, phone, password, full_name, role = 'buyer' } = req.body;
+        
+        // Validate required fields
+        if (!email || !phone || !password || !full_name) {
+            return res.status(400).json({
+                success: false,
+                message: 'All fields are required: email, phone, password, full_name'
+            });
+        }
+
+        // Check if user exists
+        const existing = await query(
+            'SELECT id FROM users WHERE email = $1 OR phone = $2',
+            [email, phone]
+        );
+
+        if (existing.rows.length > 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'User already exists with this email or phone'
+            });
+        }
+
+        // Hash password
+        const hashedPassword = await bcrypt.hash(password, 12);
+
+        // Create user
+        const result = await query(
+            `INSERT INTO users (email, phone, password_hash, full_name, role)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING id, email, phone, full_name, role, is_verified, created_at`,
+            [email, phone, hashedPassword, full_name, role]
+        );
+
+        const user = result.rows[0];
+
+        // Generate token
+        const token = jwt.sign(
+            { id: user.id, email: user.email, role: user.role },
+            process.env.JWT_SECRET || 'your-secret-key',
+            { expiresIn: '7d' }
+        );
+
+        res.status(201).json({
+            success: true,
+            message: 'User registered successfully',
+            token,
+            user
+        });
+
+    } catch (error) {
+        console.error('Registration error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error during registration'
+        });
+    }
+});
+
+// Login
+router.post('/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+
+        if (!email || !password) {
+            return res.status(400).json({
+                success: false,
+                message: 'Email and password required'
+            });
+        }
+
+        // Find user
+        const result = await query(
+            'SELECT * FROM users WHERE email = $1',
+            [email]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid credentials'
+            });
+        }
+
+        const user = result.rows[0];
+        
+        // Check password
+        const isMatch = await bcrypt.compare(password, user.password_hash);
+        if (!isMatch) {
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid credentials'
+            });
+        }
+
+        // Generate token
+        const token = jwt.sign(
+            { id: user.id, email: user.email, role: user.role },
+            process.env.JWT_SECRET || 'your-secret-key',
+            { expiresIn: '7d' }
+        );
+
+        // Remove password from response
+        const { password_hash, ...userWithoutPassword } = user;
+
+        res.json({
+            success: true,
+            message: 'Login successful',
+            token,
+            user: userWithoutPassword
+        });
+
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error during login'
+        });
+    }
+});
+// Update profile (country/county/name/phone)
+router.patch('/profile', require('../middleware/auth').auth, async (req, res) => {
+    try {
+        const { full_name, phone, country, county, address, id_number } = req.body;
+        const result = await query(
+            `UPDATE users SET
+                full_name = COALESCE($1, full_name),
+                phone = COALESCE($2, phone),
+                country = COALESCE($3, country),
+                county = COALESCE($4, county),
+                address = COALESCE($5, address),
+                id_number = COALESCE($6, id_number)
+             WHERE id = $7
+             RETURNING id, email, phone, full_name, role, country, county, address, id_number`,
+            [full_name, phone, country, county, address, id_number, req.user.id]
+        );
+        res.json({ success: true, user: result.rows[0] });
+    } catch (error) {
+        console.error('Profile update error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+module.exports = router;
