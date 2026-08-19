@@ -1,3 +1,4 @@
+console.log('SERVER.JS FILE STARTED EXECUTING');
 require('dotenv').config();
 const app = require('./app');
 
