@@ -1,4 +1,6 @@
-const express = require('express');
+process.on('uncaughtException', (err) => { console.error('UNCAUGHT EXCEPTION:', err)
+process.exit(1); })
+    const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
