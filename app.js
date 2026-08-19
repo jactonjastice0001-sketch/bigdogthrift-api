@@ -1,5 +1,4 @@
-process.on('uncaughtException', (err) => { console.error('UNCAUGHT EXCEPTION:', err)
-process.exit(1); })
+process.on('uncaughtException', (err) => { console.error('UNCAUGHT EXCEPTION:', err); setTimeout(() => process.exit(1), 1000); })
     const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
